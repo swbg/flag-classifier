@@ -1,4 +1,3 @@
-import logging
 import os
 from collections import defaultdict
 
@@ -9,8 +8,6 @@ from bs4 import BeautifulSoup
 
 from flag_classifier.data_loader import load_svgs
 from flag_classifier.utils import normalize_names
-
-_logger = logging.getLogger(__name__)
 
 
 def _load_index_sovereign_states(url: str) -> pd.DataFrame:
