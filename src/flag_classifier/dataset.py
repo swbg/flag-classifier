@@ -5,6 +5,7 @@ import albumentations as A
 import cv2
 import numpy as np
 import pandas as pd
+import skimage.transform
 from albumentations.core.transforms_interface import ImageOnlyTransform
 from albumentations.pytorch import ToTensorV2
 from numpy.random import Generator, default_rng
@@ -151,6 +152,148 @@ class RandomShadows(ImageOnlyTransform):
         return np.clip(img * mask[..., None], 0, 1)
 
 
+class RandomWarp(ImageOnlyTransform):
+    """
+    Distortion augmentation.
+    """
+
+    def __init__(
+        self,
+        rng: Generator,
+        n_points: int = 30,
+        shadow_intensity: float = 0.3,
+        dmp_coefs: Tuple[float, float] = (0.4, 5),
+        always_apply: bool = False,
+        p: float = 1.0,
+    ):
+        """
+        Initialize RandomResize.
+
+        :param rng: Random number generator
+        :param n_points: Number of interpolation points
+        :param shadow_intensity: Overlay shadow intensity
+        :param dmp_coefs: Dampening coefficients (trans/long)
+        :param always_apply: Whether to always apply transform
+        :param p: Probability of applying transform
+        """
+        super().__init__(always_apply, p)
+        self.n_points = n_points
+        self.shadow_intensity = shadow_intensity
+        self.dmp_coefs = dmp_coefs
+
+        self.rng = rng
+
+    def _get_base_points(self, edge_size: int) -> np.array:
+        """
+        Get base point grid (first column all zeros, second all ones, ...).
+
+        :param edge_size: Image edge size
+        :return: Base point grid
+        """
+        return np.repeat(
+            np.linspace(0, edge_size, self.n_points), self.n_points
+        ).reshape(self.n_points, self.n_points)
+
+    def _get_wave(self, n_waves: int = 3) -> np.array:
+        """
+        Generate random wave function from sine waves.
+
+        :param n_waves: Numbers of sine waves to add
+        :return: Random wave function samples
+        """
+        wave = np.zeros(self.n_points)
+        for _ in range(n_waves):
+            n_phases = 3 * self.rng.integers(1, 5)
+            amp = self.n_points / n_phases * self.rng.uniform(1, 2)
+            phase = self.rng.uniform(0, 2 * np.pi)
+            wave += amp * np.sin(
+                phase + np.linspace(0, 2 * n_phases * np.pi, self.n_points)
+            )
+        return wave
+
+    def _get_transversal_points(self, edge_size: int, n_waves: int = 3) -> np.array:
+        """
+        Get point field displaced like a transversal wave.
+
+        :param edge_size: Image edge size
+        :param n_waves: Numbers of sine waves to add
+        :return: Transversally displaced point field
+        """
+        wave = self._get_wave(n_waves)
+
+        multiplier = 1 - np.abs(np.linspace(-1, 1, self.n_points))  # triangle
+        multiplier *= self.rng.uniform(self.dmp_coefs[0], 1)  # apply dampening
+        wave_field = wave.reshape(1, -1) * multiplier.reshape(-1, 1)
+
+        point_field = self._get_base_points(edge_size)
+        point_field = np.clip(point_field + wave_field, 0, edge_size)
+
+        return point_field
+
+    def _get_longitudinal_points(self, edge_size: int, n_waves: int = 3) -> np.array:
+        """
+        Get point field displaced like a longitudinal wave.
+
+        :param edge_size: Image edge size
+        :param n_waves: Numbers of sine waves to add
+        :return: Longitudinally displaced point field
+        """
+        wave = self._get_wave(n_waves)
+        wave += self.rng.uniform(0, self.dmp_coefs[1])  # apply dampening
+        wave = np.cumsum(wave - wave.min())
+        wave -= wave[0]
+        wave /= wave[-1]
+
+        point_field = self._get_base_points(edge_size)
+        point_field = np.clip(point_field + wave.reshape(-1, 1), 0, edge_size)
+
+        return point_field
+
+    def apply(self, img: np.array, **kwargs: Any) -> np.array:
+        """
+        Apply transform to image.
+
+        :param img: Target image
+        """
+        edge_size = img.shape[0]
+        assert img.shape[1] == edge_size
+
+        base_points = self._get_base_points(edge_size=edge_size)
+        trans_points = self._get_transversal_points(edge_size=edge_size)
+        long_points = self._get_longitudinal_points(edge_size=edge_size)
+
+        src = np.stack([base_points.flat, base_points.T.flat], axis=-1)
+
+        trans_first = self.rng.uniform() > 0.5
+        if trans_first:
+            dst = np.stack([trans_points.flat, long_points.T.flat], axis=-1)
+        else:
+            dst = np.stack([long_points.flat, trans_points.T.flat], axis=-1)
+
+        tform = skimage.transform.PiecewiseAffineTransform()
+        tform.estimate(src, dst)
+
+        # Warp image
+        img = skimage.transform.warp(img, tform, output_shape=(edge_size, edge_size))
+
+        # Calculate shadow
+        if self.shadow_intensity > 0:
+            wave_diff = trans_points - base_points
+            shadow = wave_diff / np.abs(wave_diff).max() * self.shadow_intensity
+
+            if trans_first:
+                shadow = shadow.T
+
+            if self.rng.uniform() > 0.5:
+                shadow *= -1
+
+            shadow = cv2.resize(shadow, dsize=(edge_size, edge_size))[..., None]
+        else:
+            shadow = 0
+
+        return np.clip(img + shadow, 0, 1)
+
+
 class FlagDataset(Dataset):
     """
     Dataset for training the flag classifier.
@@ -205,12 +348,19 @@ class FlagDataset(Dataset):
                     ],
                     p=0.75,
                 ),
+                A.ColorJitter(
+                    brightness=0.15,
+                    contrast=0.15,
+                    saturation=0.05,
+                    hue=0.02,
+                    always_apply=True,
+                ),
                 RandomResize(self.rng, size_limit=(100, 200)),
             ]
         )
         self.augment_place = A.Compose(
             [
-                A.Rotate(p=1.0),
+                A.Rotate(always_apply=True),
                 A.Flip(p=0.5),
                 A.Transpose(p=0.5),
                 A.ColorJitter(p=0.5),
@@ -218,9 +368,10 @@ class FlagDataset(Dataset):
         )
         self.augment_img = A.Compose(
             [
-                A.Rotate(p=1.0),
+                A.Rotate(always_apply=True),
                 A.CenterCrop(self.input_size, self.input_size),
                 RandomShadows(self.rng),
+                RandomWarp(self.rng),
                 A.Normalize(
                     mean=(0.5, 0.5, 0.5), std=(0.25, 0.25, 0.25), max_pixel_value=1.0
                 ),
@@ -261,8 +412,18 @@ class FlagDataset(Dataset):
 
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    def _combine_images(self, flag: np.array, place: np.array) -> np.array:
+    def _combine_images(
+        self,
+        flag: np.array,
+        place: np.array,
+        alpha_limit: Tuple[float, float] = (0.8, 1.0),
+    ) -> np.array:
         img = place.copy()
         pos = [int((p - f) / 2) for p, f in zip(place.shape, flag.shape)]
-        img[pos[0] : pos[0] + flag.shape[0], pos[1] : pos[1] + flag.shape[1]] = flag
+        idx = (
+            slice(pos[0], pos[0] + flag.shape[0]),
+            slice(pos[1], pos[1] + flag.shape[1]),
+        )
+        alpha = self.rng.uniform(*alpha_limit)
+        img[idx] = alpha * flag + (1 - alpha) * img[idx]
         return img
