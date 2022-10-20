@@ -1,9 +1,7 @@
 from typing import Any, Dict
 
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-
-from .dataset import FlagDataset
+from torch.utils.data import DataLoader, Dataset
 
 
 class FlagDataModule(pl.LightningDataModule):
@@ -11,16 +9,17 @@ class FlagDataModule(pl.LightningDataModule):
     Data module for training the flag classifier.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], ds_class: Dataset):
         """
         Initialize FlagDataModule.
 
         :param config: Global configuration
+        :param ds_class: Dataset class (FlagGeneratorDataset or FlagReaderDataset)
         """
         super().__init__()
 
         self.config = config
-        self.dataset = FlagDataset(config)
+        self.dataset = ds_class(config)
 
     def train_dataloader(self) -> DataLoader:
         """

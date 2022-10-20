@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import skimage.transform
+import torch
 from albumentations.core.transforms_interface import ImageOnlyTransform
 from albumentations.pytorch import ToTensorV2
 from numpy.random import Generator, default_rng
@@ -37,7 +38,7 @@ class RandomResize(ImageOnlyTransform):
 
         self.rng = rng
 
-    def apply(self, img: np.array, **kwargs: Any) -> np.array:
+    def apply(self, img: np.ndarray, **kwargs: Any) -> np.ndarray:
         """
         Apply transform to image.
 
@@ -122,7 +123,7 @@ class RandomShadows(ImageOnlyTransform):
 
         return contours
 
-    def apply(self, img: np.array, **kwargs: Any) -> np.array:
+    def apply(self, img: np.ndarray, **kwargs: Any) -> np.ndarray:
         """
         Apply transform to image.
 
@@ -183,7 +184,7 @@ class RandomWarp(ImageOnlyTransform):
 
         self.rng = rng
 
-    def _get_base_points(self, edge_size: int) -> np.array:
+    def _get_base_points(self, edge_size: int) -> np.ndarray:
         """
         Get base point grid (first column all zeros, second all ones, ...).
 
@@ -194,7 +195,7 @@ class RandomWarp(ImageOnlyTransform):
             np.linspace(0, edge_size, self.n_points), self.n_points
         ).reshape(self.n_points, self.n_points)
 
-    def _get_wave(self, n_waves: int = 3) -> np.array:
+    def _get_wave(self, n_waves: int = 3) -> np.ndarray:
         """
         Generate random wave function from sine waves.
 
@@ -211,7 +212,7 @@ class RandomWarp(ImageOnlyTransform):
             )
         return wave
 
-    def _get_transversal_points(self, edge_size: int, n_waves: int = 3) -> np.array:
+    def _get_transversal_points(self, edge_size: int, n_waves: int = 3) -> np.ndarray:
         """
         Get point field displaced like a transversal wave.
 
@@ -230,7 +231,7 @@ class RandomWarp(ImageOnlyTransform):
 
         return point_field
 
-    def _get_longitudinal_points(self, edge_size: int, n_waves: int = 3) -> np.array:
+    def _get_longitudinal_points(self, edge_size: int, n_waves: int = 3) -> np.ndarray:
         """
         Get point field displaced like a longitudinal wave.
 
@@ -249,7 +250,7 @@ class RandomWarp(ImageOnlyTransform):
 
         return point_field
 
-    def apply(self, img: np.array, **kwargs: Any) -> np.array:
+    def apply(self, img: np.ndarray, **kwargs: Any) -> np.ndarray:
         """
         Apply transform to image.
 
@@ -294,9 +295,53 @@ class RandomWarp(ImageOnlyTransform):
         return np.clip(img + shadow, 0, 1)
 
 
-class FlagDataset(Dataset):
+class FlagReaderDataset(Dataset):
     """
-    Dataset for training the flag classifier.
+    Dataset for retrieving training data for the flag classifier.
+
+    Data needs to be prepared using FlagGeneratorDataset.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initialize FlagGeneratorDataset.
+
+        :param config: Global configuration
+        """
+        super().__init__()
+
+        self.config = config
+
+        self.epoch = None
+        self.dataset_dir = None
+        self.data_index = None
+        self.set_up_epoch(0)
+
+    def set_up_epoch(self, epoch: int) -> None:
+        """
+        Set up dataset for epoch.
+
+        :param epoch: Epoch
+        """
+        self.epoch = epoch
+        self.dataset_dir = os.path.join(
+            self.config["dataset_dir"], f"epoch_{self.epoch:05}"
+        )
+        self.data_index = pd.read_csv(os.path.join(self.dataset_dir, "data_index.csv"))
+
+    def __len__(self) -> int:
+        return len(self.data_index)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        item = self.data_index.iloc[index]
+        img = torch.load(os.path.join(self.dataset_dir, item.file_name))
+
+        return {"img": img, "target": item.target}
+
+
+class FlagGeneratorDataset(Dataset):
+    """
+    Dataset for generating training data for the flag classifier.
 
     Data is created synthetically by combining flag images and random samples from the
     Places365 datasets as backgrounds.
@@ -304,7 +349,7 @@ class FlagDataset(Dataset):
 
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize FlagDataset.
+        Initialize FlagGeneratorDataset.
 
         :param config: Global configuration
         """
@@ -328,7 +373,8 @@ class FlagDataset(Dataset):
         )
 
         # Random number generator for sampling places
-        self.rng = default_rng(self.config["global_seed"])
+        self.rng = None
+        self.set_seed(self.config["global_seed"])
 
         # Create image transforms
         self.augment_flag = A.Compose(
@@ -404,7 +450,7 @@ class FlagDataset(Dataset):
 
         return {"img": img, "target": item.target}
 
-    def _read_image(self, file_name: str) -> np.array:
+    def _read_image(self, file_name: str) -> np.ndarray:
         img = cv2.imread(file_name)
 
         if img is None:
@@ -414,10 +460,10 @@ class FlagDataset(Dataset):
 
     def _combine_images(
         self,
-        flag: np.array,
-        place: np.array,
+        flag: np.ndarray,
+        place: np.ndarray,
         alpha_limit: Tuple[float, float] = (0.8, 1.0),
-    ) -> np.array:
+    ) -> np.ndarray:
         img = place.copy()
         pos = [int((p - f) / 2) for p, f in zip(place.shape, flag.shape)]
         idx = (
@@ -427,3 +473,11 @@ class FlagDataset(Dataset):
         alpha = self.rng.uniform(*alpha_limit)
         img[idx] = alpha * flag + (1 - alpha) * img[idx]
         return img
+
+    def set_seed(self, seed: int) -> None:
+        """
+        Set seed of random number generator.
+
+        :param seed: Seed
+        """
+        self.rng = default_rng(seed)
