@@ -1,0 +1,24 @@
+# General
+global_seed: 42
+num_workers: 4
+
+# Data
+n_classes: 208
+input_size: 224
+data_index_flags: "/root/data/sovereign_states/data_index.csv"
+data_dir_flags: "/root/data/sovereign_states/png/"
+data_index_places: "/root/data/places365/val.txt"
+data_dir_places: "/root/data/places365/"
+n_per_flag:
+  train: 32
+  val: 2
+  test: 2
+
+# Dataset
+dataset_dir: "/root/data/flag_dataset"
+max_epochs: 15
+
+# Training
+batch_size: 64
+learning_rate: 0.001
+weight_decay: 0.001
