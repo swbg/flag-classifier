@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torchvision
 
+from flag_classifier.dataset import FlagReaderDataset
+
 
 class FlagClassifier(pl.LightningModule):
     """
@@ -22,7 +24,6 @@ class FlagClassifier(pl.LightningModule):
         self.config = config
 
         self.model = self._build_model()
-
         self.loss = nn.CrossEntropyLoss()
 
         self.unfreeze()
@@ -59,6 +60,19 @@ class FlagClassifier(pl.LightningModule):
     ) -> Dict[str, Any]:
         return {"loss": self.loss(y_pred, y_true)}
 
+    def _calculate_accuracies(
+        self, y_pred: torch.Tensor, y_true: torch.Tensor
+    ) -> Dict[str, Any]:
+        result = {}
+
+        _, idx = y_pred.topk(5)
+        for i in (1, 3, 5):
+            result[f"top{i}acc"] = (
+                (idx[:, :i] == y_true.view(-1, 1)).sum(axis=1).float().mean()
+            )
+
+        return result
+
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """
         Perform training step.
@@ -81,20 +95,45 @@ class FlagClassifier(pl.LightningModule):
         :param batch: Validation batch
         :param batch_idx: Batch index
         """
-        x = batch["img"]
-        y_pred = self.model(x)
+        y_pred = self.model(batch["img"])
 
         metrics = self._calculate_metrics(y_pred, batch["target"])
-        metrics["val_acc"] = torch.mean(
-            (torch.argmax(y_pred, dim=1) == batch["target"]).float()
-        )
+        metrics.update(self._calculate_accuracies(y_pred, batch["target"]))
 
         self.log_dict({f"val_{k}": v for k, v in metrics.items()})
-        return metrics["val_acc"]
+        return metrics["top1acc"]
+
+    def test_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        """
+        Perform test step.
+
+        :param batch: Validation batch
+        :param batch_idx: Batch index
+        """
+        y_pred = self.model(batch["img"])
+
+        metrics = self._calculate_metrics(y_pred, batch["target"])
+        metrics.update(self._calculate_accuracies(y_pred, batch["target"]))
+
+        self.log_dict({f"test_{k}": v for k, v in metrics.items()})
+        return metrics["top1acc"]
 
     def configure_optimizers(self):
         """
         Configure optimizers.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.config["learning_rate"],
+            weight_decay=self.config["weight_decay"],
+        )
         return optimizer
+
+    def on_train_epoch_start(self) -> None:
+        """
+        Hadle train epoch start.
+        """
+        dataset = self.trainer.train_dataloader.dataset.datasets
+        if isinstance(dataset, FlagReaderDataset):
+            # Change directory of dataset
+            dataset.set_up_epoch(self.current_epoch)

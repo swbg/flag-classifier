@@ -1,7 +1,9 @@
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
+
+from flag_classifier.dataset import FlagGeneratorDataset, FlagReaderDataset
 
 
 class FlagDataModule(pl.LightningDataModule):
@@ -9,24 +11,34 @@ class FlagDataModule(pl.LightningDataModule):
     Data module for training the flag classifier.
     """
 
-    def __init__(self, config: Dict[str, Any], ds_class: Dataset):
+    def __init__(
+        self, config: Dict[str, Any], mode: Literal["read", "generate"] = "read"
+    ):
         """
         Initialize FlagDataModule.
 
         :param config: Global configuration
-        :param ds_class: Dataset class (FlagGeneratorDataset or FlagReaderDataset)
         """
         super().__init__()
 
         self.config = config
-        self.dataset = ds_class(config)
+        self.mode = mode
+
+        if mode == "read":
+            self.train_dataset = FlagReaderDataset(config, mode="train")
+            self.val_dataset = FlagReaderDataset(config, mode="val")
+        else:
+            self.train_dataset = FlagGeneratorDataset(config, mode="train")
+            self.val_dataset = FlagGeneratorDataset(config, mode="val")
+
+        self.test_dataset = FlagReaderDataset(config, mode="test")
 
     def train_dataloader(self) -> DataLoader:
         """
         Create train data loader.
         """
         return DataLoader(
-            dataset=self.dataset,
+            dataset=self.train_dataset,
             batch_size=self.config["batch_size"],
             shuffle=True,
             pin_memory=True,
@@ -38,7 +50,7 @@ class FlagDataModule(pl.LightningDataModule):
         Create validation data loader.
         """
         return DataLoader(
-            dataset=self.dataset,
+            dataset=self.val_dataset,
             batch_size=self.config["batch_size"],
             shuffle=False,
             pin_memory=True,
@@ -50,7 +62,7 @@ class FlagDataModule(pl.LightningDataModule):
         Create test dataloader.
         """
         return DataLoader(
-            dataset=self.dataset,
+            dataset=self.test_dataset,
             batch_size=self.config["batch_size"],
             shuffle=False,
             pin_memory=True,
